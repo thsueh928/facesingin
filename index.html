@@ -131,28 +131,35 @@
 
   // 1. 初始化與載入 AI 模型 (使用 GitHub Pages 的免費 CDN 模型資源)
   async function init() {
+  const statusMsg = document.getElementById('status-msg');
+  statusMsg.innerText = '⏳ 正在從 Google 雲端載入人員資料與 AI 模型...';
+  
+  try {
+    // 1. 先向 Google 試算表抓取人員名單
+    const response = await fetch(SCRIPT_URL);
+    users = await response.json();
+    
+    // 2. 載入人臉辨識模型
     const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
-    try {
-      await Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-      ]);
-      
-      isModelLoaded = true;
-      document.getElementById('status-msg').style.background = '#d4edda';
-      document.getElementById('status-msg').innerText = '✅ AI 模型載入成功！系統就緒。';
-      document.getElementById('save-user-btn').disabled = false;
-      
-      updateFaceMatcher();
-      renderUsersTable();
-      renderLogsTable();
-      startVideo();
-    } catch (err) {
-      document.getElementById('status-msg').innerText = '❌ 模型載入失敗，請檢查網路連線。';
-      console.error(err);
-    }
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+    ]);
+    
+    isModelLoaded = true;
+    statusMsg.style.background = '#d4edda';
+    statusMsg.innerText = '✅ 雲端資料與 AI 模型載入成功！';
+    document.getElementById('save-user-btn').disabled = false;
+    
+    updateFaceMatcher();
+    renderUsersTable();
+    startVideo();
+  } catch (err) {
+    statusMsg.innerText = '❌ 雲端資料載入失敗，請確認 API 網址或網路狀況。';
+    console.error(err);
   }
+}
 
   // 2. 開啟鏡頭與進行即時辨識
   async function startVideo() {
@@ -203,75 +210,86 @@
 
   // 3. 觸發簽到成功邏輯
   function handleAttendanceSuccess(user) {
-    const now = Date.now();
-    // 防重複簽到冷卻判斷
-    if (lastCheckTime[user.id] && (now - lastCheckTime[user.id] < COOLDOWN_TIME)) {
-      return; 
-    }
-    lastCheckTime[user.id] = now;
+  const now = Date.now();
+  // 防重複簽到冷卻（8秒內不重複傳送）
+  if (lastCheckTime[user.id] && (now - lastCheckTime[user.id] < COOLDOWN_TIME)) {
+    return; 
+  }
+  lastCheckTime[user.id] = now;
 
-    // 1. 顯示提示 Toast
-    const toast = document.getElementById('success-toast');
-    const toastInfo = document.getElementById('toast-info');
-    toastInfo.innerText = `班級：${user.className} | 座號：${user.seatNum} | 姓名：${user.userName}`;
-    toast.style.display = 'block';
+  // 1. 畫面上跳出簽到成功綠色卡片
+  const toast = document.getElementById('success-toast');
+  const toastInfo = document.getElementById('toast-info');
+  toastInfo.innerText = `班級：${user.className} | 座號：${user.seatNum} | 姓名：${user.userName}`;
+  toast.style.display = 'block';
+  setTimeout(() => { toast.style.display = 'none'; }, 4000);
 
-    setTimeout(() => { toast.style.display = 'none'; }, 4000); // 4 秒後自動關閉
-
-    // 2. 寫入簽到紀錄
-    const logItem = {
+  // 2. 自動寫入 Google 試算表
+  fetch(SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      action: 'addLog',
       time: new Date().toLocaleString('zh-TW'),
       className: user.className,
       seatNum: user.seatNum,
       userName: user.userName
-    };
-    logs.unshift(logItem); // 新紀錄排在最前
-    localStorage.setItem('face_logs', JSON.stringify(logs));
-    renderLogsTable();
-  }
+    })
+  })
+  .then(res => res.json())
+  .then(data => console.log('雲端紀錄成功！', data))
+  .catch(err => console.error('寫入雲端失敗：', err));
+}
 
   // 4. 後端人員資料建檔（計算上傳圖片的特徵值）
   document.getElementById('user-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const className = document.getElementById('class-name').value;
-    const seatNum = document.getElementById('seat-num').value;
-    const userName = document.getElementById('user-name').value;
-    const photoFile = document.getElementById('user-photo').files[0];
+  e.preventDefault();
+  const className = document.getElementById('class-name').value;
+  const seatNum = document.getElementById('seat-num').value;
+  const userName = document.getElementById('user-name').value;
+  const photoFile = document.getElementById('user-photo').files[0];
 
-    if (!photoFile) return;
+  if (!photoFile) return;
 
-    document.getElementById('status-msg').innerText = '⏳ 正在讀取相片並擷取人臉特徵...';
-    
-    const img = await faceapi.bufferToImage(photoFile);
-    const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
-      .withFaceLandmarks()
-      .withFaceDescriptor();
+  document.getElementById('status-msg').innerText = '⏳ 正在讀取相片並上傳至雲端...';
+  
+  const img = await faceapi.bufferToImage(photoFile);
+  const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks()
+    .withFaceDescriptor();
 
-    if (!detection) {
-      alert("❌ 無法在該照片中偵測到清晰的人臉，請重新更換一張大頭照！");
-      document.getElementById('status-msg').innerText = '✅ AI 模型載入成功！系統就緒。';
-      return;
-    }
+  if (!detection) {
+    alert("❌ 無法在該照片中偵測到清晰的人臉，請重新更換一張照片！");
+    return;
+  }
 
-    // 建立新人員物件
-    const newUser = {
-      id: 'user_' + Date.now(),
-      className,
-      seatNum,
-      userName,
-      // 將 Float32Array 特徵向量轉為普通 Array 才能存入 localStorage
-      descriptor: Array.from(detection.descriptor)
-    };
+  const newUser = {
+    id: 'user_' + Date.now(),
+    className: className,
+    seatNum: seatNum,
+    userName: userName,
+    descriptor: Array.from(detection.descriptor)
+  };
 
+  // 上傳至 Google 試算表 Users 工作表
+  fetch(SCRIPT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({
+      action: 'addUser',
+      ...newUser
+    })
+  })
+  .then(res => res.json())
+  .then(data => {
     users.push(newUser);
-    localStorage.setItem('face_users', JSON.stringify(users));
-    
     updateFaceMatcher();
     renderUsersTable();
-    
     document.getElementById('user-form').reset();
-    document.getElementById('status-msg').innerText = `✅ 人員 [${userName}] 建檔成功！`;
-  });
+    document.getElementById('status-msg').innerText = `✅ 人員 [${userName}] 已成功建檔至雲端！`;
+  })
+  .catch(err => alert('新增人員至雲端失敗！'));
+});
 
   // 5. 更新 FaceMatcher 比對物件
   function updateFaceMatcher() {
@@ -348,5 +366,6 @@
   // 初始化執行
   window.onload = init;
 </script>
+// https://script.google.com/macros/s/AKfycby0NHsBfblejMHhmMAjwmZ_HgxWZB00dzuaHSTlhcnDaRpV-_H6pKaCg_E66R1u6w60/exec
 </body>
 </html>
