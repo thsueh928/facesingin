@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>人臉辨識簽到點名系統</title>
+
+  <!-- 載入 face-api.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { margin: 0; padding: 20px; background: #f5f7fa; color: #333; }
+    .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+    
+    /* 頁籤選單 */
+    .tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #eee; }
+    .tab-btn { padding: 12px 24px; border: none; background: none; font-size: 16px; font-weight: bold; cursor: pointer; color: #666; }
+    .tab-btn.active { color: #007bff; border-bottom: 3px solid #007bff; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* 簽到區域 UI */
+    .scan-container { display: flex; flex-direction: column; align-items: center; position: relative; }
+    .video-wrapper { position: relative; width: 640px; height: 480px; max-width: 100%; background: #000; border-radius: 8px; overflow: hidden; }
+    video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+    
+    /* 簽到成功提示彈窗 */
+    .toast {
+      display: none; position: absolute; top: 20px; background: rgba(40, 167, 69, 0.95);
+      color: white; padding: 15px 30px; border-radius: 8px; text-align: center;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.2); z-index: 10; animation: fadeIn 0.3s ease;
+    }
+    .toast h3 { margin: 0 0 5px 0; font-size: 20px; }
+    .toast p { margin: 0; font-size: 16px; }
+
+    /* 表單與表格 UI */
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; font-weight: bold; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
+    button.btn-primary { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 16px; }
+    button.btn-primary:hover { background: #0056b3; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background-color: #f8f9fa; }
+
+    #status-msg { margin-bottom: 15px; padding: 10px; border-radius: 6px; background: #e9ecef; font-weight: bold; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>人臉辨識簽到點名系統</h2>
+  <div id="status-msg">⏳ 正在載入 AI 人臉辨識模型，請稍候...</div>
+
+  <!-- 頁籤切換 -->
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('scan')">📷 簽到掃瞄</button>
+    <button class="tab-btn" onclick="switchTab('admin')">👤 人員建檔與紀錄</button>
+  </div>
+
+  <!-- 分頁 1: 簽到掃瞄畫面 -->
+  <div id="scan-tab" class="tab-content active">
+    <div class="scan-container">
+      <!-- 簽到成功訊息 -->
+      <div id="success-toast" class="toast">
+        <h3>✅ 簽到成功！</h3>
+        <p id="toast-info">班級：- | 座號：- | 姓名：-</p>
+      </div>
+
+      <div class="video-wrapper">
+        <video id="webcam" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分頁 2: 後端人員管理與點名紀錄 -->
+  <div id="admin-tab" class="tab-content">
+    <h3>新增人員資料</h3>
+    <form id="user-form">
+      <div class="form-group">
+        <label>班級</label>
+        <input type="text" id="class-name" placeholder="例如：三年一班" required>
+      </div>
+      <div class="form-group">
+        <label>座號</label>
+        <input type="text" id="seat-num" placeholder="例如：05" required>
+      </div>
+      <div class="form-group">
+        <label>姓名</label>
+        <input type="text" id="user-name" placeholder="例如：張小明" required>
+      </div>
+      <div class="form-group">
+        <label>個人照片（需清晰包含單人臉部）</label>
+        <input type="file" id="user-photo" accept="image/*" required>
+      </div>
+      <button type="submit" class="btn-primary" id="save-user-btn" disabled>儲存人員資料</button>
+    </form>
+
+    <hr style="margin: 30px 0; border: 0; border-top: 1px solid #eee;">
+
+    <h3>📋 已註冊人員清單</h3>
+    <table id="users-table">
+      <thead>
+        <tr><th>班級</th><th>座號</th><th>姓名</th><th>操作</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3 style="margin-top: 30px;">⏱️ 簽到紀錄紀錄表</h3>
+    <button class="btn-primary" onclick="exportLogsCSV()" style="background:#28a745; margin-bottom: 10px;">📥 匯出 Excel (CSV)</button>
+    <table id="logs-table">
+      <thead>
+        <tr><th>日期時間</th><th>班級</th><th>座號</th><th>姓名</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  let users = JSON.parse(localStorage.getItem('face_users') || '[]');
+  let logs = JSON.parse(localStorage.getItem('face_logs') || '[]');
+  let faceMatcher = null;
+  let isModelLoaded = false;
+  let lastCheckTime = {}; // 防重複簽到冷卻紀錄
+  const COOLDOWN_TIME = 8000; // 同一人簽到冷卻時間（8秒）
+
+  // 1. 初始化與載入 AI 模型 (使用 GitHub Pages 的免費 CDN 模型資源)
+  async function init() {
+    const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+    try {
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+      ]);
+      
+      isModelLoaded = true;
+      document.getElementById('status-msg').style.background = '#d4edda';
+      document.getElementById('status-msg').innerText = '✅ AI 模型載入成功！系統就緒。';
+      document.getElementById('save-user-btn').disabled = false;
+      
+      updateFaceMatcher();
+      renderUsersTable();
+      renderLogsTable();
+      startVideo();
+    } catch (err) {
+      document.getElementById('status-msg').innerText = '❌ 模型載入失敗，請檢查網路連線。';
+      console.error(err);
+    }
+  }
+
+  // 2. 開啟鏡頭與進行即時辨識
+  async function startVideo() {
+    const video = document.getElementById('webcam');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      video.srcObject = stream;
+    } catch (err) {
+      alert("無法開啟攝影機，請確認瀏覽器已允許攝影機權限！");
+    }
+
+    video.addEventListener('play', () => {
+      const canvas = document.getElementById('overlay');
+      const displaySize = { width: video.width || 640, height: video.height || 480 };
+      faceapi.matchDimensions(canvas, displaySize);
+
+      setInterval(async () => {
+        if (!isModelLoaded) return;
+
+        // 偵測人臉與計算特徵值
+        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+          .withFaceLandmarks()
+          .withFaceDescriptors();
+
+        const resizedDetections = faceapi.resizeResults(detections, displaySize);
+        canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+
+        // 繪製綠色人臉框
+        faceapi.draw.drawDetections(canvas, resizedDetections);
+
+        // 如果資料庫有人員，進行比對
+        if (faceMatcher && detections.length > 0) {
+          detections.forEach(detection => {
+            const match = faceMatcher.findBestMatch(detection.descriptor);
+            
+            // distance < 0.5 表示相似度高，比對成功
+            if (match.label !== 'unknown' && match.distance < 0.5) {
+              const matchedUser = users.find(u => u.id === match.label);
+              if (matchedUser) {
+                handleAttendanceSuccess(matchedUser);
+              }
+            }
+          });
+        }
+      }, 500); // 每 0.5 秒比對一次
+    });
+  }
+
+  // 3. 觸發簽到成功邏輯
+  function handleAttendanceSuccess(user) {
+    const now = Date.now();
+    // 防重複簽到冷卻判斷
+    if (lastCheckTime[user.id] && (now - lastCheckTime[user.id] < COOLDOWN_TIME)) {
+      return; 
+    }
+    lastCheckTime[user.id] = now;
+
+    // 1. 顯示提示 Toast
+    const toast = document.getElementById('success-toast');
+    const toastInfo = document.getElementById('toast-info');
+    toastInfo.innerText = `班級：${user.className} | 座號：${user.seatNum} | 姓名：${user.userName}`;
+    toast.style.display = 'block';
+
+    setTimeout(() => { toast.style.display = 'none'; }, 4000); // 4 秒後自動關閉
+
+    // 2. 寫入簽到紀錄
+    const logItem = {
+      time: new Date().toLocaleString('zh-TW'),
+      className: user.className,
+      seatNum: user.seatNum,
+      userName: user.userName
+    };
+    logs.unshift(logItem); // 新紀錄排在最前
+    localStorage.setItem('face_logs', JSON.stringify(logs));
+    renderLogsTable();
+  }
+
+  // 4. 後端人員資料建檔（計算上傳圖片的特徵值）
+  document.getElementById('user-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const className = document.getElementById('class-name').value;
+    const seatNum = document.getElementById('seat-num').value;
+    const userName = document.getElementById('user-name').value;
+    const photoFile = document.getElementById('user-photo').files[0];
+
+    if (!photoFile) return;
+
+    document.getElementById('status-msg').innerText = '⏳ 正在讀取相片並擷取人臉特徵...';
+    
+    const img = await faceapi.bufferToImage(photoFile);
+    const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+
+    if (!detection) {
+      alert("❌ 無法在該照片中偵測到清晰的人臉，請重新更換一張大頭照！");
+      document.getElementById('status-msg').innerText = '✅ AI 模型載入成功！系統就緒。';
+      return;
+    }
+
+    // 建立新人員物件
+    const newUser = {
+      id: 'user_' + Date.now(),
+      className,
+      seatNum,
+      userName,
+      // 將 Float32Array 特徵向量轉為普通 Array 才能存入 localStorage
+      descriptor: Array.from(detection.descriptor)
+    };
+
+    users.push(newUser);
+    localStorage.setItem('face_users', JSON.stringify(users));
+    
+    updateFaceMatcher();
+    renderUsersTable();
+    
+    document.getElementById('user-form').reset();
+    document.getElementById('status-msg').innerText = `✅ 人員 [${userName}] 建檔成功！`;
+  });
+
+  // 5. 更新 FaceMatcher 比對物件
+  function updateFaceMatcher() {
+    if (users.length === 0) {
+      faceMatcher = null;
+      return;
+    }
+    const labeledDescriptors = users.map(user => {
+      const descriptor = new Float32Array(user.descriptor);
+      return new faceapi.LabeledFaceDescriptors(user.id, [descriptor]);
+    });
+    faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.5);
+  }
+
+  // 渲染畫面表格與介面
+  function renderUsersTable() {
+    const tbody = document.querySelector('#users-table tbody');
+    tbody.innerHTML = users.map(u => `
+      <tr>
+        <td>${u.className}</td>
+        <td>${u.seatNum}</td>
+        <td>${u.userName}</td>
+        <td><button onclick="deleteUser('${u.id}')" style="color:red; cursor:pointer;">刪除</button></td>
+      </tr>
+    `).join('');
+  }
+
+  function renderLogsTable() {
+    const tbody = document.querySelector('#logs-table tbody');
+    tbody.innerHTML = logs.map(l => `
+      <tr>
+        <td>${l.time}</td>
+        <td>${l.className}</td>
+        <td>${l.seatNum}</td>
+        <td>${l.userName}</td>
+      </tr>
+    `).join('');
+  }
+
+  function deleteUser(id) {
+    if (confirm("確定要刪除該人員資料嗎？")) {
+      users = users.filter(u => u.id !== id);
+      localStorage.setItem('face_users', JSON.stringify(users));
+      updateFaceMatcher();
+      renderUsersTable();
+    }
+  }
+
+  function exportLogsCSV() {
+    let csvContent = "\uFEFF日期時間,班級,座號,姓名\n";
+    logs.forEach(l => {
+      csvContent += `"${l.time}","${l.className}","${l.seatNum}","${l.userName}"\n`;
+    });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `簽到紀錄_${new Date().toISOString().split('T')[0]}.csv`;
+    link.click();
+  }
+
+  function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+    
+    if (tabName === 'scan') {
+      document.querySelectorAll('.tab-btn')[0].classList.add('active');
+      document.getElementById('scan-tab').classList.add('active');
+    } else {
+      document.querySelectorAll('.tab-btn')[1].classList.add('active');
+      document.getElementById('admin-tab').classList.add('active');
+    }
+  }
+
+  // 初始化執行
+  window.onload = init;
+</script>
+</body>
+</html>
